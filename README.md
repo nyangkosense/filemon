@@ -32,13 +32,6 @@ requires linux with netlink connector support
 - root privileges (for netlink connector)
 - gcc with c99 support
 
-## files
-
-	main.c	    main program
-	proc.c		/proc filesystem utilities
-	proc.h		process definitions
-	Makefile	build rules
-
 ## architecture
 
 uses kernel apis directly instead of heavyweight frameworks:
