@@ -29,6 +29,7 @@
 #include <linux/netlink.h>
 
 #include "proc.h"
+#include "uid.h"
 
 #define MAX_EVENTS 10
 #define MAX_PROCS 1024
@@ -99,75 +100,6 @@ usage(void)
 	die("usage: who [-o output] directory\n");
 }
 
-int
-main(int argc, char *argv[])
-{
-	const char *outpath;
-	int opt, nfds;
-	struct epoll_event events[MAX_EVENTS];
-
-	outpath = "who.log";
-
-	while ((opt = getopt(argc, argv, "o:")) != -1) {
-		switch (opt) {
-		case 'o':
-			outpath = optarg;
-			break;
-		default:
-			usage();
-		}
-	}
-
-	if (optind >= argc)
-		usage();
-
-	if (strlen(argv[optind]) >= MAX_PATH)
-		die("directory path too long");
-
-	strcpy(dir, argv[optind]);
-
-	signal(SIGINT, sighandler);
-	signal(SIGTERM, sighandler);
-
-	out = fopen(outpath, "w");
-	if (!out)
-		die("fopen %s:", outpath);
-
-	efd = epoll_create1(EPOLL_CLOEXEC);
-	if (efd == -1)
-		die("epoll_create1:");
-
-	nlfd = initnetlink();
-	ifd = initinotify(dir);
-
-	scanprocs();
-
-	state = STATE_MONITORING;
-	fprintf(out, "# Who - started monitoring %s\n", dir);
-	fprintf(out, "# Active processes: %d\n", nprocs);
-	fflush(out);
-
-	while (state == STATE_MONITORING) {
-		nfds = epoll_wait(efd, events, MAX_EVENTS, -1);
-		if (nfds == -1) {
-			if (errno == EINTR)
-				continue;
-			die("epoll_wait:");
-		}
-
-		for (int i = 0; i < nfds; i++) {
-			if (events[i].data.fd == nlfd) {
-				handleproc();
-			} else if (events[i].data.fd == ifd) {
-				handlefile();
-			}
-		}
-	}
-
-	cleanup();
-	return 0;
-}
-
 static void
 sighandler(int sig)
 {
@@ -180,7 +112,7 @@ initnetlink(void)
 {
 	struct sockaddr_nl sa_nl;
 	struct epoll_event ev;
-	int sock;
+	int sock, bufsize = 65536;
 
 	sock = socket(PF_NETLINK, SOCK_DGRAM, NETLINK_CONNECTOR);
 	if (sock == -1)
@@ -194,8 +126,6 @@ initnetlink(void)
 	if (bind(sock, (struct sockaddr *)&sa_nl, sizeof(sa_nl)) == -1)
 		die("bind:");
 
-	/* Increase socket buffer size */
-	int bufsize = 65536;
 	if (setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize)) == -1)
 		die("setsockopt:");
 
@@ -533,11 +463,11 @@ logchange(const char *path, Process *proc, uint32_t mask)
 	strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", tm);
 
 	if (proc) {
-		fprintf(out, "%s %s %s pid=%d uid=%d gid=%d comm=%s cwd=%s\n",
+		fprintf(out, "%s %s %s pid=%d user=%s gid=%d comm=%s cwd=%s\n",
 		        ts, maskstr(mask), path,
-		        proc->pid, proc->uid, proc->gid, proc->comm, proc->cwd);
+		        proc->pid, uidname(proc->uid), proc->gid, proc->comm, proc->cwd);
 	} else {
-		fprintf(out, "%s %s %s pid=? uid=? gid=? comm=? cwd=?\n",
+		fprintf(out, "%s %s %s pid=? user=? gid=? comm=? cwd=?\n",
 		        ts, maskstr(mask), path);
 	}
 
@@ -580,4 +510,74 @@ scanprocs(void)
 	}
 
 	closedir(proc_dir);
+}
+
+int
+main(int argc, char *argv[])
+{
+	const char *outpath;
+	int opt, nfds;
+	struct epoll_event events[MAX_EVENTS];
+
+	outpath = "who.log";
+
+	while ((opt = getopt(argc, argv, "o:")) != -1) {
+		switch (opt) {
+		case 'o':
+			outpath = optarg;
+			break;
+		default:
+			usage();
+		}
+	}
+
+	if (optind >= argc)
+		usage();
+
+	if (strlen(argv[optind]) >= MAX_PATH)
+		die("directory path too long");
+
+	strcpy(dir, argv[optind]);
+
+	signal(SIGINT, sighandler);
+	signal(SIGTERM, sighandler);
+
+	out = fopen(outpath, "w");
+	if (!out)
+		die("fopen %s:", outpath);
+
+	efd = epoll_create1(EPOLL_CLOEXEC);
+	if (efd == -1)
+		die("epoll_create1:");
+
+	nlfd = initnetlink();
+	ifd = initinotify(dir);
+
+	uidinit();
+	scanprocs();
+
+	state = STATE_MONITORING;
+	fprintf(out, "# Who - started monitoring %s\n", dir);
+	fprintf(out, "# Active processes: %d\n", nprocs);
+	fflush(out);
+
+	while (state == STATE_MONITORING) {
+		nfds = epoll_wait(efd, events, MAX_EVENTS, -1);
+		if (nfds == -1) {
+			if (errno == EINTR)
+				continue;
+			die("epoll_wait:");
+		}
+
+		for (int i = 0; i < nfds; i++) {
+			if (events[i].data.fd == nlfd) {
+				handleproc();
+			} else if (events[i].data.fd == ifd) {
+				handlefile();
+			}
+		}
+	}
+
+	cleanup();
+	return 0;
 }
