@@ -9,13 +9,14 @@
 
 #include "uid.h"
 
+#define HASHSIZE 101
+
 struct uidentry {
 	struct uidentry *next;
 	uid_t uid;
 	char *name;
 };
 
-#define HASHSIZE 101
 static struct uidentry *hashtab[HASHSIZE];
 
 static unsigned

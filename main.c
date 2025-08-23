@@ -115,7 +115,7 @@ initnetlink(void)
 	int sock, bufsize = 65536;
 
 	sock = socket(PF_NETLINK, SOCK_DGRAM, NETLINK_CONNECTOR);
-	if (sock == -1)
+	if (sock < 0)
 		die("socket:");
 
 	memset(&sa_nl, 0, sizeof(sa_nl));
@@ -123,10 +123,10 @@ initnetlink(void)
 	sa_nl.nl_groups = CN_IDX_PROC;
 	sa_nl.nl_pid = getpid();
 
-	if (bind(sock, (struct sockaddr *)&sa_nl, sizeof(sa_nl)) == -1)
+	if (bind(sock, (struct sockaddr *)&sa_nl, sizeof(sa_nl)) < 0)
 		die("bind:");
 
-	if (setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize)) == -1)
+	if (setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize)) < 0)
 		die("setsockopt:");
 
 	struct {
@@ -147,12 +147,12 @@ initnetlink(void)
 	msg.cn_msg.len = sizeof(enum proc_cn_mcast_op);
 	msg.cn_mcast = PROC_CN_MCAST_LISTEN;
 
-	if (send(sock, &msg, sizeof(msg), 0) == -1)
+	if (send(sock, &msg, sizeof(msg), 0) < 0)
 		die("send:");
 
 	ev.events = EPOLLIN;
 	ev.data.fd = sock;
-	if (epoll_ctl(efd, EPOLL_CTL_ADD, sock, &ev) == -1)
+	if (epoll_ctl(efd, EPOLL_CTL_ADD, sock, &ev) < 0)
 		die("epoll_ctl:");
 
 	return sock;
@@ -170,7 +170,7 @@ handleproc(void)
 	struct proc_event *ev;
 
 	len = recv(nlfd, &msg, sizeof(msg), 0);
-	if (len == -1) {
+	if (len < 0) {
 		if (errno == EINTR || errno == EAGAIN)
 			return;
 		die("recv:");
@@ -261,17 +261,17 @@ initinotify(const char *dir)
 	int fd;
 
 	fd = inotify_init1(IN_CLOEXEC);
-	if (fd == -1)
+	if (fd < 0)
 		die("inotify_init1:");
 
-	if (addwatch(fd, dir) == -1) {
+	if (addwatch(fd, dir) < 0) {
 		close(fd);
 		die("add_watch_recursive:");
 	}
 
 	ev.events = EPOLLIN;
 	ev.data.fd = fd;
-	if (epoll_ctl(efd, EPOLL_CTL_ADD, fd, &ev) == -1) {
+	if (epoll_ctl(efd, EPOLL_CTL_ADD, fd, &ev) < 0) {
 		close(fd);
 		die("epoll_ctl:");
 	}
@@ -290,7 +290,7 @@ addwatch(int fd, const char *path)
 
 	wd = inotify_add_watch(fd, path, IN_CREATE | IN_DELETE | IN_MODIFY |
 	                       IN_MOVED_FROM | IN_MOVED_TO | IN_CLOSE_WRITE);
-	if (wd == -1)
+	if (wd < 0)
 		return -1;
 
 	dir = opendir(path);
@@ -308,11 +308,11 @@ addwatch(int fd, const char *path)
 			return -1;
 		}
 
-		if (stat(fullpath, &statbuf) == -1)
+		if (stat(fullpath, &statbuf) < 0)
 			continue;
 
 		if (S_ISDIR(statbuf.st_mode)) {
-			if (addwatch(fd, fullpath) == -1) {
+			if (addwatch(fd, fullpath) < 0) {
 				closedir(dir);
 				return -1;
 			}
@@ -332,7 +332,7 @@ handlefile(void)
 	Process *proc;
 
 	len = read(ifd, buffer, sizeof(buffer));
-	if (len == -1) {
+	if (len < 0) {
 		if (errno == EINTR || errno == EAGAIN)
 			return;
 		die("read:");
@@ -547,7 +547,7 @@ main(int argc, char *argv[])
 		die("fopen %s:", outpath);
 
 	efd = epoll_create1(EPOLL_CLOEXEC);
-	if (efd == -1)
+	if (efd < 0)
 		die("epoll_create1:");
 
 	nlfd = initnetlink();
@@ -563,7 +563,7 @@ main(int argc, char *argv[])
 
 	while (state == STATE_MONITORING) {
 		nfds = epoll_wait(efd, events, MAX_EVENTS, -1);
-		if (nfds == -1) {
+		if (nfds < 0) {
 			if (errno == EINTR)
 				continue;
 			die("epoll_wait:");
