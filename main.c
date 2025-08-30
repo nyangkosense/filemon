@@ -53,7 +53,6 @@ static int state = STATE_INIT;
 static int nlfd = -1;
 static int ifd = -1;
 static int efd = -1;
-static FILE *out = NULL;
 static Process procs[MAX_PROCS];
 static int nprocs = 0;
 static char dir[MAX_PATH];
@@ -97,7 +96,7 @@ die(const char *fmt, ...)
 static void
 usage(void)
 {
-	die("usage: who [-o output] directory\n");
+	die("usage: who directory\n");
 }
 
 static void
@@ -203,39 +202,25 @@ handleproc(void)
 static Process *
 findproc(pid_t pid)
 {
-	int i;
+	Process *p = procs;
 
-	for (i = 0; i < nprocs; i++) {
-		if (procs[i].active && procs[i].pid == pid)
-			return &procs[i];
-	}
-	return NULL;
+	for (; p < procs + MAX_PROCS && (p->pid != pid || !p->active); ++p);
+	return p < procs + MAX_PROCS ? p : NULL;
 }
 
 static void
 addproc(pid_t pid, pid_t ppid, const char *comm)
 {
-	Process *proc;
-	int i;
-
-	proc = findproc(pid);
+	Process *proc = findproc(pid);
+	
 	if (!proc) {
-		for (i = 0; i < MAX_PROCS; i++) {
-			if (!procs[i].active) {
-				proc = &procs[i];
-				nprocs++;
-				break;
-			}
-		}
+		for (proc = procs; proc < procs + MAX_PROCS && proc->active; ++proc);
+		if (proc >= procs + MAX_PROCS)
+			return;
+		nprocs++;
 	}
 
-	if (!proc)
-		return;
-
-	proc->pid = pid;
-	proc->ppid = ppid;
-	proc->active = 1;
-	proc->start = time(NULL);
+	*proc = (Process){pid, ppid, 0, 0, "", "", time(NULL), 1};
 	strncpy(proc->comm, comm, sizeof(proc->comm) - 1);
 	proc->comm[sizeof(proc->comm) - 1] = '\0';
 
@@ -245,13 +230,9 @@ addproc(pid_t pid, pid_t ppid, const char *comm)
 static void
 rmproc(pid_t pid)
 {
-	Process *proc;
-
-	proc = findproc(pid);
-	if (proc) {
-		proc->active = 0;
-		nprocs--;
-	}
+	Process *proc = findproc(pid);
+	
+	(proc && (proc->active = 0, nprocs--, 0));
 }
 
 static int
@@ -298,8 +279,8 @@ addwatch(int fd, const char *path)
 		return -1;
 
 	while ((entry = readdir(dir)) != NULL) {
-		if (strcmp(entry->d_name, ".") == 0 ||
-		    strcmp(entry->d_name, "..") == 0)
+		if (entry->d_name[0] == '.' && (!entry->d_name[1] || 
+		    (entry->d_name[1] == '.' && !entry->d_name[2])))
 			continue;
 
 		if (snprintf(fullpath, sizeof(fullpath), "%s/%s",
@@ -400,18 +381,13 @@ correlate(const char *path, time_t ts)
 {
 	Process *best, *proc;
 	time_t bestdiff, diff;
-	int i;
 
 	best = NULL;
 	bestdiff = LONG_MAX;
 
-	for (i = 0; i < MAX_PROCS; i++) {
-		proc = &procs[i];
-
-		if (!proc->active || proc->start > ts)
-			continue;
-
-		if (proc->pid < 100 || ts - proc->start > 86400 || 
+	for (proc = procs; proc < procs + MAX_PROCS; ++proc) {
+		if (!proc->active || proc->start > ts ||
+		    proc->pid < 100 || ts - proc->start > 86400 || 
 		    strstr(proc->comm, "kworker") || strstr(proc->comm, "ksoftirqd") ||
 		    strstr(proc->comm, "migration") || proc->comm[0] == '[')
 			continue;
@@ -463,24 +439,21 @@ logchange(const char *path, Process *proc, uint32_t mask)
 	strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", tm);
 
 	if (proc) {
-		fprintf(out, "%s %s %s pid=%d user=%s gid=%d comm=%s cwd=%s\n",
-		        ts, maskstr(mask), path,
-		        proc->pid, uidname(proc->uid), proc->gid, proc->comm, proc->cwd);
+		printf("%s %s %s pid=%d user=%s gid=%d comm=%s cwd=%s\n",
+		       ts, maskstr(mask), path,
+		       proc->pid, uidname(proc->uid), proc->gid, proc->comm, proc->cwd);
 	} else {
-		fprintf(out, "%s %s %s pid=? user=? gid=? comm=? cwd=?\n",
-		        ts, maskstr(mask), path);
+		printf("%s %s %s pid=? user=? gid=? comm=? cwd=?\n",
+		       ts, maskstr(mask), path);
 	}
 
-	fflush(out);
+	fflush(stdout);
 }
 
 static void
 cleanup(void)
 {
-	if (out) {
-		fprintf(out, "# Who - shutdown\n");
-		fclose(out);
-	}
+	printf("# Who - shutdown\n");
 	if (nlfd != -1)
 		close(nlfd);
 	if (ifd != -1)
@@ -501,50 +474,33 @@ scanprocs(void)
 	if (!proc_dir)
 		return;
 
-	while ((entry = readdir(proc_dir)) != NULL) {
+	while ((entry = readdir(proc_dir))) {
 		pid = strtol(entry->d_name, &endptr, 10);
-		if (*endptr != '\0' || pid <= 0)
-			continue;
-
-		addproc(pid, 0, "existing");
+		if (!(*endptr || pid <= 0))
+			addproc(pid, 0, "existing");
 	}
 
 	closedir(proc_dir);
 }
 
 int
-main(int argc, char *argv[])
+main(int argc, char **argv)
 {
-	const char *outpath;
-	int opt, nfds;
+	(void)argc;
+	int nfds;
 	struct epoll_event events[MAX_EVENTS];
 
-	outpath = "who.log";
-
-	while ((opt = getopt(argc, argv, "o:")) != -1) {
-		switch (opt) {
-		case 'o':
-			outpath = optarg;
-			break;
-		default:
-			usage();
-		}
-	}
-
-	if (optind >= argc)
+	if (!*++argv)
 		usage();
 
-	if (strlen(argv[optind]) >= MAX_PATH)
+	if (strlen(*argv) >= MAX_PATH)
 		die("directory path too long");
 
-	strcpy(dir, argv[optind]);
+	strcpy(dir, *argv);
 
 	signal(SIGINT, sighandler);
 	signal(SIGTERM, sighandler);
 
-	out = fopen(outpath, "w");
-	if (!out)
-		die("fopen %s:", outpath);
 
 	efd = epoll_create1(EPOLL_CLOEXEC);
 	if (efd < 0)
@@ -556,12 +512,11 @@ main(int argc, char *argv[])
 	uidinit();
 	scanprocs();
 
-	state = STATE_MONITORING;
-	fprintf(out, "# Who - started monitoring %s\n", dir);
-	fprintf(out, "# Active processes: %d\n", nprocs);
-	fflush(out);
+	printf("who - started monitoring %s\n", dir);
+	printf("active processes: %d\n", nprocs);
+	fflush(stdout);
 
-	while (state == STATE_MONITORING) {
+  for (;;) {
 		nfds = epoll_wait(efd, events, MAX_EVENTS, -1);
 		if (nfds < 0) {
 			if (errno == EINTR)
@@ -569,13 +524,8 @@ main(int argc, char *argv[])
 			die("epoll_wait:");
 		}
 
-		for (int i = 0; i < nfds; i++) {
-			if (events[i].data.fd == nlfd) {
-				handleproc();
-			} else if (events[i].data.fd == ifd) {
-				handlefile();
-			}
-		}
+		for (struct epoll_event *ev = events; ev < events + nfds; ++ev)
+			(ev->data.fd == nlfd) ? handleproc() : handlefile();
 	}
 
 	cleanup();
