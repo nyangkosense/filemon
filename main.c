@@ -213,12 +213,11 @@ addproc(pid_t pid, pid_t ppid, const char *comm)
 {
 	Process *proc = findproc(pid);
 	
-	if (!proc) {
-		for (proc = procs; proc < procs + MAX_PROCS && proc->active; ++proc);
-		if (proc >= procs + MAX_PROCS)
-			return;
-		nprocs++;
-	}
+	if (!proc && (proc = procs, 1))
+		for (; proc < procs + MAX_PROCS && proc->active; ++proc);
+	if (proc >= procs + MAX_PROCS)
+		return;
+	proc->active || nprocs++;
 
 	*proc = (Process){pid, ppid, 0, 0, "", "", time(NULL), 1};
 	strncpy(proc->comm, comm, sizeof(proc->comm) - 1);
@@ -453,7 +452,6 @@ logchange(const char *path, Process *proc, uint32_t mask)
 static void
 cleanup(void)
 {
-	printf("# Who - shutdown\n");
 	if (nlfd != -1)
 		close(nlfd);
 	if (ifd != -1)
@@ -486,7 +484,7 @@ scanprocs(void)
 int
 main(int argc, char **argv)
 {
-	(void)argc;
+  (void)argc;
 	int nfds;
 	struct epoll_event events[MAX_EVENTS];
 
@@ -518,11 +516,8 @@ main(int argc, char **argv)
 
   for (;;) {
 		nfds = epoll_wait(efd, events, MAX_EVENTS, -1);
-		if (nfds < 0) {
-			if (errno == EINTR)
-				continue;
-			die("epoll_wait:");
-		}
+		if (nfds < 0)
+			errno == EINTR ? (void)0 : die("epoll_wait:");
 
 		for (struct epoll_event *ev = events; ev < events + nfds; ++ev)
 			(ev->data.fd == nlfd) ? handleproc() : handlefile();
