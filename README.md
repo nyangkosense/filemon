@@ -1,8 +1,9 @@
 # filemon
 
-"filemon" tracks which processes modify files on Linux. It gives you the PID, user, command, and working directory without pulling in a web of dependencies or frameworks. Why should finding out which process wrote to a file require complex setups, containers, or megabytes of libraries? 
+*filemon tracks which processes modify files on Linux*. 
+It gives you the PID, user, command, and working directory without pulling in a web of dependencies or frameworks. Why should finding out which process wrote to a file require complex setups, containers, or megabytes of libraries? 
 
-No configuration files, no plugins, no threads. Just ~650 lines of C with a single, focused purpose: tell you who touched your files; accurately when possible, gracefully when not. It uses built-in Linux interfaces like fanotify or falls back to simple heuristics when permissions or kernel limitations demand it. If any part of the system fails, it degrades, it doesn't crash. 
+No configuration files, no plugins, no threads, using built-in Linux interfaces like fanotify or falls back to simple heuristics when permissions or kernel limitations demand it. If any part of the system fails, it degrades, it doesn't crash. 
 
 Example output:
 ```
@@ -12,9 +13,13 @@ active processes: 326
 2025-09-04 11:50:49 DELETE /tmp/dddd pid=31486 user=smi gid=1000 comm=mksh cwd=/tmp
 ```
 
+filemon prints directly to `stdout` because that is a universal interface.
+Other formats (e.g., JSON, XML, or databases) impose structure and assumptions on the output, locking you into specific use cases or requiring additional processing tools.
+If you want JSON for example, you can pipe the output to a formatter. If you want to filter specific fields, `grep`, `sed`, `cut` or `awk` can do it for you.
+
 ## How It Works
 
-The program uses `inotify` to monitor file operations, enhanced by two methods for associating events with processes:
+filemon uses `inotify` to monitor file operations, enhanced by two methods for associating events with processes:
 
  When running as root, it uses `fanotify` to obtain exact PIDs for write operations. Events from inotify and fanotify are correlated by matching paths and timestamps. 
  
@@ -24,7 +29,7 @@ Some events, like metadata updates (`chmod`, `unlink`) or deletes, do not genera
 
 ## Design and Implementation
 
-The system is built to be small, efficient, and reliable. Events are processed sequentially, avoiding threads or dependencies. Fanotify events are cached in a lightweight ring buffer indexed by path. On an inotify event, this cache is checked first. If no match exists, filemon falls back to consulting the process table. 
+Events are processed sequentially, avoiding threads or dependencies. Fanotify events are cached in a lightweight ring buffer indexed by path. On an inotify event, this cache is checked first. If no match exists, filemon falls back to consulting the process table. 
 
 ## Limitations
 
