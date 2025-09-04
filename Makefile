@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -std=c99 -Wall -Wextra -O2 -D_POSIX_C_SOURCE=200809L
-TARGET = who
+TARGET = filemon
 SOURCES = main.c proc.c uid.c
 
 .PHONY: all clean install

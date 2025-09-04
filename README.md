@@ -1,63 +1,31 @@
-# who
+# README
 
-who is a simple file monitor that tracks which processes modify files
+"filemon" tracks which processes modify files on Linux. It gives you the PID, user, command, and working directory without pulling in a web of dependencies or frameworks. Why should finding out which process wrote to a file require complex setups, containers, or megabytes of libraries? 
 
-## usage
+No configuration files, no plugins, no threads. Just ~650 lines of C with a single, focused purpose: tell you who touched your files; accurately when possible, gracefully when not. It uses built-in Linux interfaces like fanotify or falls back to simple heuristics when permissions or kernel limitations demand it. If any part of the system fails, it degrades, it doesn't crash. 
 
-	who [-o output] directory
+## How It Works
 
-monitor `directory` recursively and log file changes to `output` (default: who.log)
+The program uses `inotify` to monitor file operations, enhanced by two methods for associating events with processes:
 
-## build
+ When running as root, it uses `fanotify` to obtain exact PIDs for write operations. Events from inotify and fanotify are correlated by matching paths and timestamps. 
+ 
+ Without root privileges, a heuristic approach is used instead: the process table is scanned for processes that started before the event and are likely responsible. While this fallback is less precise, it works for most scenarios.
 
-	make
+Some events, like metadata updates (`chmod`, `unlink`) or deletes, do not generate fanotify notifications, even with root. These always rely on the heuristic. The process table is maintained dynamically using netlink to track active processes, ensuring it is accurate during correlation.
 
-requires linux with netlink connector support
+## Design and Implementation
 
-## how it works
+The system is built to be small, efficient, and reliable. Events are processed sequentially, avoiding threads or dependencies. Fanotify events are cached in a lightweight ring buffer indexed by path. On an inotify event, this cache is checked first. If no match exists, filemon falls back to consulting the process table. 
 
-- uses inotify for file events
-- uses netlink connector for process events  
-- correlates file changes to processes via /proc filesystem
-- filters kernel threads and long-running daemons
-- prefers recently started user processes
+## Limitations
 
-## output format
+Accurate PID detection requires root. Without it, the heuristic may miss operations that occur quickly or involve multiple writers. Metadata operations and deletes always use the heuristic, regardless of privileges, due to kernel limitations. Network filesystems may not emit events depending on their mount options and protocols. The program is designed only for local filesystems. Modern distributions with restrictions on kernel interfaces such as `eBPF` may further constrain the heuristic's effectiveness.
 
-	timestamp action path pid=N uid=N gid=N comm=name cwd=dir
+## Compatibility
 
-## requirements
+The program requires Linux 2.6.37 or newer to use fanotify. For older kernels, only heuristic correlation is available. It has been tested on kernel versions from 3.10 to 6.x and works in containers when fanotify is permitted. It compiles on any POSIX system, but the monitoring is Linux-specific. There are no runtime dependencies, special kernel modules, or configuration files. A single binary can run anywhere. 
 
-- linux 2.6.14+
-- root privileges (for netlink connector)
-- gcc with c99 support
+## Testing
 
-## architecture
-
-uses kernel apis directly instead of heavyweight frameworks:
-
-- netlink connector catches all process lifecycle events (fork/exec/exit)
-- inotify provides efficient file change notifications
-- /proc filesystem gives process context (cwd, uid, comm)
-- epoll multiplexes events in single thread
-
-correlation heuristic: prefer recently started processes with directory access
-
-who tracks process lifecycle events via netlink. processes started before
-it's initialization are not tracked and may be incorrectly attributed to
-long-running parent processes (shells, multiplexers). start who before
-launching monitored applications for accurate correlation.
-
-## limitations
-
-- linux specific (netlink, /proc, inotify)
-- requires root for netlink connector
-- correlation is heuristic, not guaranteed accurate
-- no support for containers/namespaces
-- limited to MAX_PROCS (1024) tracked processes
-- long pathnames may be truncated
-- processes started before who cannot be correlated accurately
-
-## license
-
-MIT
+Testing is manual to preserve simplicity. Automated process correlation testing would introduce unnecessary complexity that goes against the program's minimalistic design.

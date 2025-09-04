@@ -1,9 +1,9 @@
 /* See LICENSE file for copyright and license details.
- * who - file change process tracker
- * Monitors directory recursively and tracks which processes modify files
+ * filemon - monitors directory recursively and tracks which processes modify files
  */
 
 #define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 
 #include <errno.h>
 #include <fcntl.h>
@@ -17,6 +17,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/select.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -27,6 +28,7 @@
 #include <linux/cn_proc.h>
 #include <linux/connector.h>
 #include <linux/netlink.h>
+#include <sys/fanotify.h>
 
 #include "proc.h"
 #include "uid.h"
@@ -57,6 +59,17 @@ static Process procs[MAX_PROCS];
 static int nprocs = 0;
 static char dir[MAX_PATH];
 
+static int usefan = -1, fanfd = -1;
+
+struct fev {
+	char path[256];
+	pid_t pid;
+	time_t ts;
+};
+
+static struct fev fevs[32];
+static int nfevs = 0;
+
 /* function declarations */
 static void die(const char *fmt, ...);
 static void usage(void);
@@ -73,6 +86,9 @@ static void logchange(const char *path, Process *proc, uint32_t mask);
 static void cleanup(void);
 static void sighandler(int sig);
 static void scanprocs(void);
+static int initfan(void);
+static Process *corfan(const char *path, time_t ts);
+static Process *corheur(const char *path, time_t ts);
 
 static void
 die(const char *fmt, ...)
@@ -96,7 +112,7 @@ die(const char *fmt, ...)
 static void
 usage(void)
 {
-	die("usage: who directory\n");
+	die("usage: filemon directory\n");
 }
 
 static void
@@ -155,6 +171,41 @@ initnetlink(void)
 		die("epoll_ctl:");
 
 	return sock;
+}
+
+static void
+readfan(void)
+{
+    char buf[4096], path[256], fdpath[64];
+    struct fanotify_event_metadata *meta;
+    ssize_t len, plen;
+
+    if ((len = read(fanfd, buf, sizeof(buf))) < (ssize_t)sizeof(*meta))
+        return;
+
+    for (meta = (struct fanotify_event_metadata *)buf; 
+         FAN_EVENT_OK(meta, len); 
+         meta = FAN_EVENT_NEXT(meta, len)) 
+    {
+        if (meta->fd >= 0)
+            close(meta->fd);
+
+        if (meta->vers != FANOTIFY_METADATA_VERSION || meta->fd < 0 || nfevs >= 32)
+            continue;
+
+        snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", meta->fd);
+
+        if ((plen = readlink(fdpath, path, sizeof(path) - 1)) <= 0)
+            continue;
+
+        path[plen] = 0;
+
+        strncpy(fevs[nfevs].path, path, sizeof(fevs[nfevs].path) - 1);
+        fevs[nfevs].path[sizeof(fevs[nfevs].path) - 1] = 0;
+        fevs[nfevs].pid = meta->pid;
+        fevs[nfevs].ts = time(NULL);
+        ++nfevs;
+    }
 }
 
 static void
@@ -353,7 +404,7 @@ static int
 hasaccess(Process *proc, const char *filepath)
 {
 	char *fdir, *dpath;
-	int cwdlen, dpathlen;
+	int cwdlen, dpathlen, result;
 
 	if (!(fdir = strdup(filepath)))
 		return 0;
@@ -367,16 +418,16 @@ hasaccess(Process *proc, const char *filepath)
 	cwdlen = strlen(proc->cwd);
 	dpathlen = strlen(dpath);
 
-	int result = !strcmp(dpath, proc->cwd) ||
-	            (!strncmp(dpath, proc->cwd, cwdlen) && dpath[cwdlen] == '/') ||
-	            (!strncmp(proc->cwd, dpath, dpathlen) && proc->cwd[dpathlen] == '/');
+	result = !strcmp(dpath, proc->cwd) ||
+	         (!strncmp(dpath, proc->cwd, cwdlen) && dpath[cwdlen] == '/') ||
+	         (!strncmp(proc->cwd, dpath, dpathlen) && proc->cwd[dpathlen] == '/');
 
 	free(fdir);
 	return result;
 }
 
 static Process *
-correlate(const char *path, time_t ts)
+corheur(const char *path, time_t ts)
 {
 	Process *best, *proc;
 	time_t bestdiff, diff;
@@ -391,7 +442,6 @@ correlate(const char *path, time_t ts)
 		    strstr(proc->comm, "migration") || proc->comm[0] == '[')
 			continue;
 
-		/* Only update process info if it's stale */
 		if (ts - proc->start > 60)
 			updateproc(proc);
 
@@ -406,6 +456,63 @@ correlate(const char *path, time_t ts)
 	}
 
 	return best;
+}
+
+static Process *
+corfan(const char *path, time_t ts)
+{
+	int i;
+
+    for (i = 0; i < nfevs; ++i) {
+        if (ts - fevs[i].ts > 5 || strcmp(fevs[i].path, path)) {
+            continue;
+        }
+        Process *proc = findproc(fevs[i].pid);
+        if (proc) {
+            updateproc(proc);
+            return proc;
+        }
+        addproc(fevs[i].pid, 0, "fanotify");
+        if ((proc = findproc(fevs[i].pid))) {
+            updateproc(proc);
+            return proc;
+        }
+        return NULL;
+    }
+    return NULL;
+}
+
+static Process *
+correlate(const char *path, time_t ts)
+{
+    Process *proc;
+    fd_set rfds;
+	int result;
+    struct timeval tv = {0, 0};
+
+    if (usefan < 0) {
+        initfan();
+    }
+
+    if (usefan && fanfd >= 0) {
+        FD_ZERO(&rfds);
+        FD_SET(fanfd, &rfds);
+
+        result = select(fanfd + 1, &rfds, NULL, NULL, &tv);
+
+        if (result > 0) {
+            readfan();
+        }
+    }
+
+    if (usefan) {
+        proc = corfan(path, ts);
+        if (proc) {
+            return proc;
+        }
+    }
+
+    return corheur(path, ts);
 }
 
 static const char *
@@ -481,6 +588,22 @@ scanprocs(void)
 	closedir(proc_dir);
 }
 
+static int
+initfan(void)
+{
+	struct epoll_event ev;
+	
+	return usefan != -1 ? usefan :
+	       (usefan = 0,
+	        !getuid() &&
+	        (fanfd = fanotify_init(FAN_CLASS_NOTIF, O_RDONLY | O_LARGEFILE)) >= 0 &&
+	        !fanotify_mark(fanfd, FAN_MARK_ADD | FAN_MARK_MOUNT, 
+	                      FAN_MODIFY | FAN_CLOSE_WRITE | FAN_OPEN | FAN_ACCESS, AT_FDCWD, dir) &&
+	        (ev.events = EPOLLIN, ev.data.fd = fanfd,
+	         !epoll_ctl(efd, EPOLL_CTL_ADD, fanfd, &ev)) ?
+	        (usefan = 1) : (fanfd >= 0 && close(fanfd), fanfd = -1, 0));
+}
+
 int
 main(int argc, char **argv)
 {
@@ -506,21 +629,26 @@ main(int argc, char **argv)
 
 	nlfd = initnetlink();
 	ifd = initinotify(dir);
+	
 
 	uidinit();
 	scanprocs();
 
-	printf("who - started monitoring %s\n", dir);
+	printf("filemon - started monitoring %s\n", dir);
 	printf("active processes: %d\n", nprocs);
 	fflush(stdout);
 
-  for (;;) {
+  for (; state != STATE_SHUTDOWN;) {
 		nfds = epoll_wait(efd, events, MAX_EVENTS, -1);
-		if (nfds < 0)
-			errno == EINTR ? (void)0 : die("epoll_wait:");
+		if (nfds < 0) {
+			if (errno == EINTR)
+				continue;
+			die("epoll_wait:");
+		}
 
 		for (struct epoll_event *ev = events; ev < events + nfds; ++ev)
-			(ev->data.fd == nlfd) ? handleproc() : handlefile();
+			ev->data.fd == nlfd ? handleproc() :
+			ev->data.fd == fanfd ? readfan() : handlefile();
 	}
 
 	cleanup();
