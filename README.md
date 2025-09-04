@@ -1,4 +1,4 @@
-# README
+# filemon
 
 "filemon" tracks which processes modify files on Linux. It gives you the PID, user, command, and working directory without pulling in a web of dependencies or frameworks. Why should finding out which process wrote to a file require complex setups, containers, or megabytes of libraries? 
 
