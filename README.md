@@ -4,6 +4,14 @@
 
 No configuration files, no plugins, no threads. Just ~650 lines of C with a single, focused purpose: tell you who touched your files; accurately when possible, gracefully when not. It uses built-in Linux interfaces like fanotify or falls back to simple heuristics when permissions or kernel limitations demand it. If any part of the system fails, it degrades, it doesn't crash. 
 
+Example output:
+```
+filemon - started monitoring /tmp/
+active processes: 326
+2025-09-04 11:50:43 CREATE /tmp/dddd pid=31486 user=smi gid=1000 comm=mksh cwd=/tmp
+2025-09-04 11:50:49 DELETE /tmp/dddd pid=31486 user=smi gid=1000 comm=mksh cwd=/tmp
+```
+
 ## How It Works
 
 The program uses `inotify` to monitor file operations, enhanced by two methods for associating events with processes:
